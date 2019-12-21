@@ -1,0 +1,17 @@
+PB0 = Kirmizi = a
+PB1 = Turuncu = b
+PB2 = Sari = c
+PB3 = Gri = d
+PB4 = Yesil = e
+PB5 = Mavi = f
+PB6 = Mor = g
+
+PE0(P30)=kirmizi
+PE1     =turuncu
+PE2     =sari
+PE3     =siyah
+
+Anot Segment Kurulumu = Pinleri dirençlerden geçir güce 3,3 V ver. Anot eksi yüklü oldugu için segment kodlarinin
+tersi alinir o yüzden kodlari ters çevir (~)
+
+Katot Segment Kurulumu = Pinleri dirençlerden geçir güce GND ver

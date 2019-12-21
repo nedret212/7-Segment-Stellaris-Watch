@@ -1,0 +1,875 @@
+#include <stdint.h>
+#include "inc/lm4f120h5qr.h"
+#include <stdbool.h>
+#include "inc/hw_types.h"
+#include "driverlib/gpio.h"
+#include "driverlib/sysctl.h"
+#include "driverlib/uart.h"
+#include "utils/uartstdio.h"
+#include "inc/hw_ints.h"
+#include "inc/hw_memmap.h"
+#include "driverlib/timer.h"
+
+
+static inline void disable_interrupts() {
+asm("CPSID I");
+}
+static inline void enable_interrupts() {
+asm("CPSIE I");
+}
+static inline void wait_for_interrupt() {
+asm("WFI");
+}
+
+void init_port_B(){
+	volatile unsigned long delay;
+	SYSCTL_RCGC2_R|=SYSCTL_RCGC2_GPIOB;
+	delay=SYSCTL_RCGC2_R;
+	GPIO_PORTB_DIR_R|=0xFF;
+	GPIO_PORTB_AFSEL_R&=~0xFF;
+	GPIO_PORTB_DEN_R|=0xFF;
+}
+
+void init_port_E(){
+	volatile unsigned long delay;
+	SYSCTL_RCGC2_R|=SYSCTL_RCGC2_GPIOE;
+	delay=SYSCTL_RCGC2_R;
+	GPIO_PORTE_DIR_R|=0x0f;
+	GPIO_PORTE_AFSEL_R&=~0x0f;
+	GPIO_PORTE_DEN_R|=0x0f;
+}
+void init_port_F() {
+	volatile unsigned long delay;
+	SYSCTL_RCGCGPIO_R |= 0x00000020; // 1) activate clock for Port F
+	delay = SYSCTL_RCGCGPIO_R; // allow time for clock to start
+	GPIO_PORTF_LOCK_R = 0x4C4F434B; // 2) unlock GPIO Port F
+	GPIO_PORTF_CR_R = 0x1F; // allow changes to PF4-0
+// only PF0 needs to be unlocked, other bits can't be locked
+	GPIO_PORTF_AMSEL_R = 0x00; // 3) disable analog on PF
+	GPIO_PORTF_PCTL_R = 0x00000000; // 4) PCTL GPIO on PF4-0
+	GPIO_PORTF_DIR_R = 0x0E; // 5) PF4,PF0 in, PF3-1 out
+	GPIO_PORTF_AFSEL_R = 0x00; // 6) disable alt funct on PF7-0
+	GPIO_PORTF_PUR_R = 0x11; // enable pull-up on PF0 and PF4
+	GPIO_PORTF_DEN_R = 0x1F; // 7) enable digital I/O on PF4-0
+}
+
+void PF4_interrupt_init() {
+	GPIO_PORTF_IS_R &= ~0b10001; // (d) PC4 is edge-sensitive
+	GPIO_PORTF_IBE_R &= ~0b10001; // PC4 is not both edges
+	GPIO_PORTF_IEV_R &= ~0b10001; // PC4 falling edge event
+	GPIO_PORTF_ICR_R = 0b10001; // (e) clear flag4
+	GPIO_PORTF_IM_R |= 0b10001; // (f) arm interrupt on PC4
+			/*
+			 * PORT icin kullanilan degerlerin anlami icin
+			 * http://users.ece.utexas.edu/~valvano/Volume1/E-Book/C12_Interrupts.htm#12_3
+			 * Tablo 12.1'e bakiniz
+			 */
+	NVIC_PRI7_R = (NVIC_PRI7_R & 0xFF00FFFF) | 0x00A00000; // (g) priority 5
+	NVIC_EN0_R |= (1 << 30); // (h) enable interrupt 30 in NVIC
+}
+
+
+//DEGISKENLER
+//DEGISKENLER
+//DEGISKENLER
+
+volatile uint32_t kesme_sayisi=0;
+int saniye;
+int ayar=0;
+int kr_durdur;//saniyeye esitle
+int kr_say=0;
+
+void PortF_interrupt_handler() {
+	GPIO_PORTF_ICR_R = 0b10000;
+	GPIO_PORTF_ICR_R = 0b00001;
+
+
+	int buttonsol=GPIO_PORTF_DATA_R&0b10000;
+	int buttonsag=GPIO_PORTF_DATA_R&0b00001;
+
+	if(buttonsol==0)
+		kesme_sayisi++;
+
+	if(kesme_sayisi%6==1) //birler basamagi
+	{
+		GPIO_PORTF_DATA_R&=~0b1100;
+		GPIO_PORTF_DATA_R|=0b10;
+		if(buttonsag==0)
+		{
+			saniye+=60;
+		}
+
+	}
+	else if(kesme_sayisi%6==2) //onlar basamagi
+	{
+		GPIO_PORTF_DATA_R|=0b100;
+		GPIO_PORTF_DATA_R&=~0b1010;
+		if(buttonsag==0)
+		{
+			saniye+=600;
+		}
+	}
+	else if(kesme_sayisi%6==3) //yuzler basamagi
+	{
+		GPIO_PORTF_DATA_R|=0b1000;
+		GPIO_PORTF_DATA_R&=~0b00110;
+		if(buttonsag==0)
+		{
+			saniye+=3600;
+		}
+	}
+	else if(kesme_sayisi%6==4) //binler basamagi
+	{
+		GPIO_PORTF_DATA_R|=0b1100;
+		GPIO_PORTF_DATA_R&=~0b0010;
+		if(buttonsag==0)
+		{
+			saniye+=36000;
+		}
+	}
+	else if(kesme_sayisi%6==5)//kronometre
+	{
+
+
+		GPIO_PORTF_DATA_R&=~0b1100;
+		GPIO_PORTF_DATA_R|=0b110;
+
+		if(buttonsag==0)
+		{
+			ayar++;
+			if(ayar%4==3)
+			{
+			kr_durdur=kr_say;
+			}
+			if(ayar%4==2)
+			{
+				kr_say=0;
+			}
+		}
+	}
+	else if(kesme_sayisi%6==0)
+	{
+		GPIO_PORTF_DATA_R&=~0b110;
+		if(buttonsag==0)
+		{
+			//islem yapma
+		}
+	}
+}
+
+void init_timer_0A(int period){
+	//timer 0 modulunu aktiflestirir
+	SysCtlPeripheralEnable(SYSCTL_PERIPH_TIMER0);
+
+	//timer 0 i periyodik olarak ayarla
+	TimerConfigure(TIMER0_BASE,TIMER_CFG_PERIODIC);
+
+	//timer0a modulunu period sayisindan geri sayacak sekilde ayarl
+	TimerLoadSet(TIMER0_BASE,TIMER_A, period);
+
+	//timer 0a kesmesini aktiflestirir
+	IntEnable(INT_TIMER0A);
+	TimerIntEnable(TIMER0_BASE,TIMER_TIMA_TIMEOUT);
+
+	//Timer 0a yi baslat
+	TimerEnable(TIMER0_BASE,TIMER_A);
+}
+
+void SysTick_Init(unsigned long period){
+NVIC_ST_CTRL_R = 0; // disable SysTick during setup
+NVIC_ST_RELOAD_R = period-1;// reload value
+NVIC_ST_CURRENT_R = 0; // any write to current clears it
+NVIC_SYS_PRI3_R = (NVIC_SYS_PRI3_R&0x00FFFFFF)|0x40000000; // priority 2
+NVIC_ST_CTRL_R = 0x07; // enable SysTick with core clock and interrupts
+// enable interrupts after all initialization is finished
+}
+
+//0 9 arasi olan sayilarin 7segment kodlari
+//bit sirasi gfedcba
+
+uint8_t kodlar[10]={
+				(0b0111111),//0
+				(0b0000110),//1
+				(0b1011011),//2
+				(0b1001111),//3
+				(0b1100110),//4
+				(0b1101101),//5
+				(0b1111101),//6
+				(0b0000111),//7
+				(0b1111111),//8
+				(0b1101111)//9
+};
+
+#define SYSTICK_HZ 10
+#define EKRAN_KESME_HZ 400
+
+uint32_t systick_count=0;
+int ekran_guncelle_sayac=0;
+
+volatile unsigned long i=0;
+
+void saatgir(int sa,int dk,int sn)
+{
+	sa*=3600;
+	dk*=60;
+	saniye=sa+dk+sn;
+}
+
+void systick_handler() { // systick kesmesi oldugunda bu fonksiyon calisacak
+	systick_count++;
+
+	if(systick_count%(SYSTICK_HZ*1)==0) //saniyede 1 art
+		saniye++;
+	    kr_say++;
+
+	if(saniye==86400 ||saniye>86400)//24 saatlik dongu
+	{
+		saniye=0;
+	}
+}
+
+
+		//SAAT KODLARI//
+		//SAAT KODLARI//
+void ekran_guncelleme_timer(){
+	TimerIntClear(TIMER0_BASE,TIMER_TIMA_TIMEOUT);
+	ekran_guncelle_sayac++;
+
+	if(kesme_sayisi%6==5)
+	{
+		if(ekran_guncelle_sayac % 4==1){
+						int birler= (saniye)%10;
+						GPIO_PORTE_DATA_R|=0b1111;
+						GPIO_PORTB_DATA_R=0b0;
+						GPIO_PORTE_DATA_R &=~0b0001; //birler basamagi aktiflesir
+					}else if(ekran_guncelle_sayac%4==2){
+						int onlar=(saniye/10)%10;
+						GPIO_PORTE_DATA_R|=0b1111;
+						GPIO_PORTB_DATA_R=0b0;
+						GPIO_PORTE_DATA_R&=~0b0010;
+					}else if(ekran_guncelle_sayac%4==3){
+						int yuzler=(saniye/60)%6;
+						GPIO_PORTE_DATA_R|=0b1111;
+						GPIO_PORTB_DATA_R=0b0;
+						GPIO_PORTE_DATA_R&=~0b0100;
+					}else if(ekran_guncelle_sayac%4==0){
+						int binler=(saniye/600)%10;
+						GPIO_PORTE_DATA_R|=0b1111;
+						GPIO_PORTB_DATA_R=0b0;
+						GPIO_PORTE_DATA_R&=~0b1000;
+					}
+		if(ayar%4==1)//sifirla
+		{
+			if(ekran_guncelle_sayac % 4==1){
+					int birler= (saniye/60)%10;
+					GPIO_PORTE_DATA_R|=0b1111;
+					GPIO_PORTB_DATA_R=0b0111111;
+					GPIO_PORTE_DATA_R &=~0b0001; //birler basamagi aktiflesir
+				}else if(ekran_guncelle_sayac%4==2){
+					int onlar=(saniye/600)%6;
+					GPIO_PORTE_DATA_R|=0b1111;
+					GPIO_PORTB_DATA_R=0b0111111;
+					GPIO_PORTE_DATA_R&=~0b0010;
+				}else if(ekran_guncelle_sayac%4==3){
+					int yuzler=(saniye/3600)%10;
+					GPIO_PORTE_DATA_R|=0b1111;
+					GPIO_PORTB_DATA_R=0b0111111;
+					GPIO_PORTE_DATA_R&=~0b0100;
+				}else if(ekran_guncelle_sayac%4==0){
+					int binler=(saniye/36000)%6;
+					GPIO_PORTE_DATA_R|=0b1111;
+					GPIO_PORTB_DATA_R=0b0111111;
+					GPIO_PORTE_DATA_R&=~0b1000;
+				}
+
+		}else if(ayar%4==2) //saymaya basla
+		{
+			if(ekran_guncelle_sayac % 4==1){
+					int birler= (kr_say)%10;
+					GPIO_PORTE_DATA_R|=0b1111;
+					GPIO_PORTB_DATA_R=kodlar[birler];
+					GPIO_PORTE_DATA_R &=~0b0001; //birler basamagi aktiflesir
+				}else if(ekran_guncelle_sayac%4==2){
+					int onlar=(kr_say/10)%10;
+					GPIO_PORTE_DATA_R|=0b1111;
+					GPIO_PORTB_DATA_R=kodlar[onlar];
+					GPIO_PORTE_DATA_R&=~0b0010;
+				}else if(ekran_guncelle_sayac%4==3){
+					int yuzler=(kr_say/100)%6;
+					GPIO_PORTE_DATA_R|=0b1111;
+					GPIO_PORTB_DATA_R=kodlar[yuzler];
+					GPIO_PORTE_DATA_R&=~0b0100;
+				}else if(ekran_guncelle_sayac%4==0){
+					int binler=(kr_say/600)%10;
+					GPIO_PORTE_DATA_R|=0b1111;
+					GPIO_PORTB_DATA_R=kodlar[binler];
+					GPIO_PORTE_DATA_R&=~0b1000;
+				}
+		}else if(ayar%4==3)  //durdur
+		{
+			if(ekran_guncelle_sayac % 4==1){
+								int birler= (kr_durdur)%10;
+								GPIO_PORTE_DATA_R|=0b1111;
+								GPIO_PORTB_DATA_R=kodlar[birler];
+								GPIO_PORTE_DATA_R &=~0b0001; //birler basamagi aktiflesir
+							}else if(ekran_guncelle_sayac%4==2){
+								int onlar=(kr_durdur/10)%10;
+								GPIO_PORTE_DATA_R|=0b1111;
+								GPIO_PORTB_DATA_R=kodlar[onlar];
+								GPIO_PORTE_DATA_R&=~0b0010;
+							}else if(ekran_guncelle_sayac%4==3){
+								int yuzler=(kr_durdur/100)%6;
+								GPIO_PORTE_DATA_R|=0b1111;
+								GPIO_PORTB_DATA_R=kodlar[yuzler];
+								GPIO_PORTE_DATA_R&=~0b0100;
+							}else if(ekran_guncelle_sayac%4==0){
+								int binler=(kr_durdur/600)%10;
+								GPIO_PORTE_DATA_R|=0b1111;
+								GPIO_PORTB_DATA_R=kodlar[binler];
+								GPIO_PORTE_DATA_R&=~0b1000;
+							}
+		}
+	}
+
+	if(saniye>=68590 && saniye<=68640)
+	{
+		if(saniye>=68590 && saniye<68595)// Q-7
+						{
+						if(ekran_guncelle_sayac % 4==1){
+								int birler= (saniye/60)%10;
+								GPIO_PORTE_DATA_R|=0b1111;
+								GPIO_PORTB_DATA_R=0b0000000;
+								GPIO_PORTE_DATA_R &=~0b0001; //birler basamagi aktiflesir
+							}else if(ekran_guncelle_sayac%4==2){
+								int onlar=(saniye/600)%6;
+								GPIO_PORTE_DATA_R|=0b1111;
+								GPIO_PORTB_DATA_R=0b0000111;//7
+								GPIO_PORTE_DATA_R&=~0b0010;
+							}else if(ekran_guncelle_sayac%4==3){
+								int yuzler=(saniye/3600)%10;
+								GPIO_PORTE_DATA_R|=0b1111;
+								GPIO_PORTB_DATA_R=0b1000000;//-
+								GPIO_PORTE_DATA_R&=~0b0100;
+							}else if(ekran_guncelle_sayac%4==0){
+								int binler=(saniye/36000)%6;
+								GPIO_PORTE_DATA_R|=0b1111;
+								GPIO_PORTB_DATA_R=0b1100111;// Q
+								GPIO_PORTE_DATA_R&=~0b1000;
+							}
+					}
+		if(saniye>=68595 && saniye<68600)// A-9
+		{
+		if(ekran_guncelle_sayac % 4==1){
+				int birler= (saniye/60)%10;
+				GPIO_PORTE_DATA_R|=0b1111;
+				GPIO_PORTB_DATA_R=0b1101111; //9
+				GPIO_PORTE_DATA_R &=~0b0001; //birler basamagi aktiflesir
+			}else if(ekran_guncelle_sayac%4==2){
+				int onlar=(saniye/600)%6;
+				GPIO_PORTE_DATA_R|=0b1111;
+				GPIO_PORTB_DATA_R=0b1000000;//-
+				GPIO_PORTE_DATA_R&=~0b0010;
+			}else if(ekran_guncelle_sayac%4==3){
+				int yuzler=(saniye/3600)%10;
+				GPIO_PORTE_DATA_R|=0b1111;
+				GPIO_PORTB_DATA_R=0b1110111;//A
+				GPIO_PORTE_DATA_R&=~0b0100;
+			}else if(ekran_guncelle_sayac%4==0){
+				int binler=(saniye/36000)%6;
+				GPIO_PORTE_DATA_R|=0b1111;
+				GPIO_PORTB_DATA_R=0b0000000;
+				GPIO_PORTE_DATA_R&=~0b1000;
+			}
+	}
+
+		if(saniye>=68600 && saniye<68605)// O-15
+						{
+						if(ekran_guncelle_sayac % 4==1){
+								int birler= (saniye/60)%10;
+								GPIO_PORTE_DATA_R|=0b1111;
+								GPIO_PORTB_DATA_R=0b1101101; //5
+								GPIO_PORTE_DATA_R &=~0b0001; //birler basamagi aktiflesir
+							}else if(ekran_guncelle_sayac%4==2){
+								int onlar=(saniye/600)%6;
+								GPIO_PORTE_DATA_R|=0b1111;
+								GPIO_PORTB_DATA_R=0b0000110;//1
+								GPIO_PORTE_DATA_R&=~0b0010;
+							}else if(ekran_guncelle_sayac%4==3){
+								int yuzler=(saniye/3600)%10;
+								GPIO_PORTE_DATA_R|=0b1111;
+								GPIO_PORTB_DATA_R=0b1000000;//-
+								GPIO_PORTE_DATA_R&=~0b0100;
+							}else if(ekran_guncelle_sayac%4==0){
+								int binler=(saniye/36000)%6;
+								GPIO_PORTE_DATA_R|=0b1111;
+								GPIO_PORTB_DATA_R=0b0111111;//O
+								GPIO_PORTE_DATA_R&=~0b1000;
+							}
+					}
+		if(saniye>=68605 && saniye<68610)// AT94
+								{
+								if(ekran_guncelle_sayac % 4==1){
+										int birler= (saniye/60)%10;
+										GPIO_PORTE_DATA_R|=0b1111;
+										GPIO_PORTB_DATA_R=0b1100110; //4
+										GPIO_PORTE_DATA_R &=~0b0001; //birler basamagi aktiflesir
+									}else if(ekran_guncelle_sayac%4==2){
+										int onlar=(saniye/600)%6;
+										GPIO_PORTE_DATA_R|=0b1111;
+										GPIO_PORTB_DATA_R=0b1101111;//9
+										GPIO_PORTE_DATA_R&=~0b0010;
+									}else if(ekran_guncelle_sayac%4==3){
+										int yuzler=(saniye/3600)%10;
+										GPIO_PORTE_DATA_R|=0b1111;
+										GPIO_PORTB_DATA_R=0b1111000;//T
+										GPIO_PORTE_DATA_R&=~0b0100;
+									}else if(ekran_guncelle_sayac%4==0){
+										int binler=(saniye/36000)%6;
+										GPIO_PORTE_DATA_R|=0b1111;
+										GPIO_PORTB_DATA_R=0b1110111;//A
+										GPIO_PORTE_DATA_R&=~0b1000;
+									}
+							}
+		if(saniye>=68610 && saniye<68615)// TA18
+										{
+										if(ekran_guncelle_sayac % 4==1){
+												int birler= (saniye/60)%10;
+												GPIO_PORTE_DATA_R|=0b1111;
+												GPIO_PORTB_DATA_R=0b1111111;//8
+												GPIO_PORTE_DATA_R &=~0b0001; //birler basamagi aktiflesir
+											}else if(ekran_guncelle_sayac%4==2){
+												int onlar=(saniye/600)%6;
+												GPIO_PORTE_DATA_R|=0b1111;
+												GPIO_PORTB_DATA_R=0b0000110;//1
+												GPIO_PORTE_DATA_R&=~0b0010;
+											}else if(ekran_guncelle_sayac%4==3){
+												int yuzler=(saniye/3600)%10;
+												GPIO_PORTE_DATA_R|=0b1111;
+												GPIO_PORTB_DATA_R=0b1110111;//A
+												GPIO_PORTE_DATA_R&=~0b0100;
+											}else if(ekran_guncelle_sayac%4==0){
+												int binler=(saniye/36000)%6;
+												GPIO_PORTE_DATA_R|=0b1111;
+												GPIO_PORTB_DATA_R=0b1111000;//T
+												GPIO_PORTE_DATA_R&=~0b1000;
+											}
+									}
+		if(saniye>=68615 && saniye<68620)// a-13
+												{
+												if(ekran_guncelle_sayac % 4==1){
+														int birler= (saniye/60)%10;
+														GPIO_PORTE_DATA_R|=0b1111;
+														GPIO_PORTB_DATA_R=0b1001111;//3
+														GPIO_PORTE_DATA_R &=~0b0001; //birler basamagi aktiflesir
+													}else if(ekran_guncelle_sayac%4==2){
+														int onlar=(saniye/600)%6;
+														GPIO_PORTE_DATA_R|=0b1111;
+														GPIO_PORTB_DATA_R=0b0000110;//1
+														GPIO_PORTE_DATA_R&=~0b0010;
+													}else if(ekran_guncelle_sayac%4==3){
+														int yuzler=(saniye/3600)%10;
+														GPIO_PORTE_DATA_R|=0b1111;
+														GPIO_PORTB_DATA_R=0b1000000;//-
+														GPIO_PORTE_DATA_R&=~0b0100;
+													}else if(ekran_guncelle_sayac%4==0){
+														int binler=(saniye/36000)%6;
+														GPIO_PORTE_DATA_R|=0b1111;
+														GPIO_PORTB_DATA_R=0b1110111;//A
+														GPIO_PORTE_DATA_R&=~0b1000;
+													}
+											}
+		if(saniye>=68620 && saniye<68626)// dt-6
+																{
+																if(ekran_guncelle_sayac % 4==1){
+																		int birler= (saniye/60)%10;
+																		GPIO_PORTE_DATA_R|=0b1111;
+																		GPIO_PORTB_DATA_R=0b1111101;//6
+																		GPIO_PORTE_DATA_R &=~0b0001; //birler basamagi aktiflesir
+																	}else if(ekran_guncelle_sayac%4==2){
+																		int onlar=(saniye/600)%6;
+																		GPIO_PORTE_DATA_R|=0b1111;
+																		GPIO_PORTB_DATA_R=0b1000000;//-
+																		GPIO_PORTE_DATA_R&=~0b0010;
+																	}else if(ekran_guncelle_sayac%4==3){
+																		int yuzler=(saniye/3600)%10;
+																		GPIO_PORTE_DATA_R|=0b1111;
+																		GPIO_PORTB_DATA_R=0b1111000;//T
+																		GPIO_PORTE_DATA_R&=~0b0100;
+																	}else if(ekran_guncelle_sayac%4==0){
+																		int binler=(saniye/36000)%6;
+																		GPIO_PORTE_DATA_R|=0b1111;
+																		GPIO_PORTB_DATA_R=0b1011110;//D
+																		GPIO_PORTE_DATA_R&=~0b1000;
+																	}
+															}
+
+		if(saniye>=68626 && saniye<=68627)// ned
+												{
+												if(ekran_guncelle_sayac % 4==1){
+														int birler= (saniye/60)%10;
+														GPIO_PORTE_DATA_R|=0b1111;
+														GPIO_PORTB_DATA_R=0b0000000;
+														GPIO_PORTE_DATA_R &=~0b0001; //birler basamagi aktiflesir
+													}else if(ekran_guncelle_sayac%4==2){
+														int onlar=(saniye/600)%6;
+														GPIO_PORTE_DATA_R|=0b1111;
+														GPIO_PORTB_DATA_R=0b1011110;//d
+														GPIO_PORTE_DATA_R&=~0b0010;
+													}else if(ekran_guncelle_sayac%4==3){
+														int yuzler=(saniye/3600)%10;
+														GPIO_PORTE_DATA_R|=0b1111;
+														GPIO_PORTB_DATA_R=0b1111001;//e
+														GPIO_PORTE_DATA_R&=~0b0100;
+													}else if(ekran_guncelle_sayac%4==0){
+														int binler=(saniye/36000)%6;
+														GPIO_PORTE_DATA_R|=0b1111;
+														GPIO_PORTB_DATA_R=0b1010100;//n
+														GPIO_PORTE_DATA_R&=~0b1000;
+													}
+											}
+		if(saniye>=68627 && saniye<=68628)// 212
+														{
+														if(ekran_guncelle_sayac % 4==1){
+																int birler= (saniye/60)%10;
+																GPIO_PORTE_DATA_R|=0b1111;
+																GPIO_PORTB_DATA_R=0b0000000;
+																GPIO_PORTE_DATA_R &=~0b0001; //birler basamagi aktiflesir
+															}else if(ekran_guncelle_sayac%4==2){
+																int onlar=(saniye/600)%6;
+																GPIO_PORTE_DATA_R|=0b1111;
+																GPIO_PORTB_DATA_R=0b1011011;//2
+																GPIO_PORTE_DATA_R&=~0b0010;
+															}else if(ekran_guncelle_sayac%4==3){
+																int yuzler=(saniye/3600)%10;
+																GPIO_PORTE_DATA_R|=0b1111;
+																GPIO_PORTB_DATA_R=0b0000110;//1
+																GPIO_PORTE_DATA_R&=~0b0100;
+															}else if(ekran_guncelle_sayac%4==0){
+																int binler=(saniye/36000)%6;
+																GPIO_PORTE_DATA_R|=0b1111;
+																GPIO_PORTB_DATA_R=0b1011011;//2
+																GPIO_PORTE_DATA_R&=~0b1000;
+															}
+													}
+		if(saniye>=68628 && saniye<=68629)// ned
+														{
+														if(ekran_guncelle_sayac % 4==1){
+																int birler= (saniye/60)%10;
+																GPIO_PORTE_DATA_R|=0b1111;
+																GPIO_PORTB_DATA_R=0b0000000;
+																GPIO_PORTE_DATA_R &=~0b0001; //birler basamagi aktiflesir
+															}else if(ekran_guncelle_sayac%4==2){
+																int onlar=(saniye/600)%6;
+																GPIO_PORTE_DATA_R|=0b1111;
+																GPIO_PORTB_DATA_R=0b1011110;//d
+																GPIO_PORTE_DATA_R&=~0b0010;
+															}else if(ekran_guncelle_sayac%4==3){
+																int yuzler=(saniye/3600)%10;
+																GPIO_PORTE_DATA_R|=0b1111;
+																GPIO_PORTB_DATA_R=0b1111001;//e
+																GPIO_PORTE_DATA_R&=~0b0100;
+															}else if(ekran_guncelle_sayac%4==0){
+																int binler=(saniye/36000)%6;
+																GPIO_PORTE_DATA_R|=0b1111;
+																GPIO_PORTB_DATA_R=0b1010100;//n
+																GPIO_PORTE_DATA_R&=~0b1000;
+															}
+													}
+		if(saniye>=68629 && saniye<=68630)// 212
+																{
+																if(ekran_guncelle_sayac % 4==1){
+																		int birler= (saniye/60)%10;
+																		GPIO_PORTE_DATA_R|=0b1111;
+																		GPIO_PORTB_DATA_R=0b0000000;
+																		GPIO_PORTE_DATA_R &=~0b0001; //birler basamagi aktiflesir
+																	}else if(ekran_guncelle_sayac%4==2){
+																		int onlar=(saniye/600)%6;
+																		GPIO_PORTE_DATA_R|=0b1111;
+																		GPIO_PORTB_DATA_R=0b1011011;//2
+																		GPIO_PORTE_DATA_R&=~0b0010;
+																	}else if(ekran_guncelle_sayac%4==3){
+																		int yuzler=(saniye/3600)%10;
+																		GPIO_PORTE_DATA_R|=0b1111;
+																		GPIO_PORTB_DATA_R=0b0000110;//1
+																		GPIO_PORTE_DATA_R&=~0b0100;
+																	}else if(ekran_guncelle_sayac%4==0){
+																		int binler=(saniye/36000)%6;
+																		GPIO_PORTE_DATA_R|=0b1111;
+																		GPIO_PORTB_DATA_R=0b1011011;//2
+																		GPIO_PORTE_DATA_R&=~0b1000;
+																	}
+															}
+
+
+		if(saniye>=68630 && saniye<=68631)//1903 a
+														{
+														if(ekran_guncelle_sayac % 4==1){
+																int birler= (saniye/60)%10;
+																GPIO_PORTE_DATA_R|=0b1111;
+																GPIO_PORTB_DATA_R=0b1001111;//3
+																GPIO_PORTE_DATA_R &=~0b0001; //birler basamagi aktiflesir
+															}else if(ekran_guncelle_sayac%4==2){
+																int onlar=(saniye/600)%6;
+																GPIO_PORTE_DATA_R|=0b1111;
+																GPIO_PORTB_DATA_R=0b0111111;//0
+																GPIO_PORTE_DATA_R&=~0b0010;
+															}else if(ekran_guncelle_sayac%4==3){
+																int yuzler=(saniye/3600)%10;
+																GPIO_PORTE_DATA_R|=0b1111;
+																GPIO_PORTB_DATA_R=0b1101111;//9
+																GPIO_PORTE_DATA_R&=~0b0100;
+															}else if(ekran_guncelle_sayac%4==0){
+																int binler=(saniye/36000)%6;
+																GPIO_PORTE_DATA_R|=0b1111;
+																GPIO_PORTB_DATA_R=0b0000110;//1
+																GPIO_PORTE_DATA_R&=~0b1000;
+															}
+													}
+		if(saniye>=68631 && saniye<=68632)//1903 k
+																{
+																if(ekran_guncelle_sayac % 4==1){
+																		int birler= (saniye/60)%10;
+																		GPIO_PORTE_DATA_R|=0b1111;
+																		GPIO_PORTB_DATA_R=0b0;
+																		GPIO_PORTE_DATA_R &=~0b0001; //birler basamagi aktiflesir
+																	}else if(ekran_guncelle_sayac%4==2){
+																		int onlar=(saniye/600)%6;
+																		GPIO_PORTE_DATA_R|=0b1111;
+																		GPIO_PORTB_DATA_R=0b0;
+																		GPIO_PORTE_DATA_R&=~0b0010;
+																	}else if(ekran_guncelle_sayac%4==3){
+																		int yuzler=(saniye/3600)%10;
+																		GPIO_PORTE_DATA_R|=0b1111;
+																		GPIO_PORTB_DATA_R=0b0;
+																		GPIO_PORTE_DATA_R&=~0b0100;
+																	}else if(ekran_guncelle_sayac%4==0){
+																		int binler=(saniye/36000)%6;
+																		GPIO_PORTE_DATA_R|=0b1111;
+																		GPIO_PORTB_DATA_R=0b0;
+																		GPIO_PORTE_DATA_R&=~0b1000;
+																	}
+															}
+		if(saniye>=68632 && saniye<=68633)//1903 a
+																{
+																if(ekran_guncelle_sayac % 4==1){
+																		int birler= (saniye/60)%10;
+																		GPIO_PORTE_DATA_R|=0b1111;
+																		GPIO_PORTB_DATA_R=0b1001111;//3
+																		GPIO_PORTE_DATA_R &=~0b0001; //birler basamagi aktiflesir
+																	}else if(ekran_guncelle_sayac%4==2){
+																		int onlar=(saniye/600)%6;
+																		GPIO_PORTE_DATA_R|=0b1111;
+																		GPIO_PORTB_DATA_R=0b0111111;//0
+																		GPIO_PORTE_DATA_R&=~0b0010;
+																	}else if(ekran_guncelle_sayac%4==3){
+																		int yuzler=(saniye/3600)%10;
+																		GPIO_PORTE_DATA_R|=0b1111;
+																		GPIO_PORTB_DATA_R=0b1101111;//9
+																		GPIO_PORTE_DATA_R&=~0b0100;
+																	}else if(ekran_guncelle_sayac%4==0){
+																		int binler=(saniye/36000)%6;
+																		GPIO_PORTE_DATA_R|=0b1111;
+																		GPIO_PORTB_DATA_R=0b0000110;//1
+																		GPIO_PORTE_DATA_R&=~0b1000;
+																	}
+															}
+				if(saniye>=68633 && saniye<=68634)//1903 k
+																		{
+																		if(ekran_guncelle_sayac % 4==1){
+																				int birler= (saniye/60)%10;
+																				GPIO_PORTE_DATA_R|=0b1111;
+																				GPIO_PORTB_DATA_R=0b0;
+																				GPIO_PORTE_DATA_R &=~0b0001; //birler basamagi aktiflesir
+																			}else if(ekran_guncelle_sayac%4==2){
+																				int onlar=(saniye/600)%6;
+																				GPIO_PORTE_DATA_R|=0b1111;
+																				GPIO_PORTB_DATA_R=0b0;
+																				GPIO_PORTE_DATA_R&=~0b0010;
+																			}else if(ekran_guncelle_sayac%4==3){
+																				int yuzler=(saniye/3600)%10;
+																				GPIO_PORTE_DATA_R|=0b1111;
+																				GPIO_PORTB_DATA_R=0b0;
+																				GPIO_PORTE_DATA_R&=~0b0100;
+																			}else if(ekran_guncelle_sayac%4==0){
+																				int binler=(saniye/36000)%6;
+																				GPIO_PORTE_DATA_R|=0b1111;
+																				GPIO_PORTB_DATA_R=0b0;
+																				GPIO_PORTE_DATA_R&=~0b1000;
+																			}
+																	}
+				if(saniye>=68634 && saniye<=68635)//1903 a
+																				{
+																				if(ekran_guncelle_sayac % 4==1){
+																						int birler= (saniye/60)%10;
+																						GPIO_PORTE_DATA_R|=0b1111;
+																						GPIO_PORTB_DATA_R=0b1001111;//3
+																						GPIO_PORTE_DATA_R &=~0b0001; //birler basamagi aktiflesir
+																					}else if(ekran_guncelle_sayac%4==2){
+																						int onlar=(saniye/600)%6;
+																						GPIO_PORTE_DATA_R|=0b1111;
+																						GPIO_PORTB_DATA_R=0b0111111;//0
+																						GPIO_PORTE_DATA_R&=~0b0010;
+																					}else if(ekran_guncelle_sayac%4==3){
+																						int yuzler=(saniye/3600)%10;
+																						GPIO_PORTE_DATA_R|=0b1111;
+																						GPIO_PORTB_DATA_R=0b1101111;//9
+																						GPIO_PORTE_DATA_R&=~0b0100;
+																					}else if(ekran_guncelle_sayac%4==0){
+																						int binler=(saniye/36000)%6;
+																						GPIO_PORTE_DATA_R|=0b1111;
+																						GPIO_PORTB_DATA_R=0b0000110;//1
+																						GPIO_PORTE_DATA_R&=~0b1000;
+																					}
+																			}
+
+						if(saniye>=68635 && saniye<=68636)//1903 k
+																				{
+																				if(ekran_guncelle_sayac % 4==1){
+																						int birler= (saniye/60)%10;
+																						GPIO_PORTE_DATA_R|=0b1111;
+																						GPIO_PORTB_DATA_R=0b0;
+																						GPIO_PORTE_DATA_R &=~0b0001; //birler basamagi aktiflesir
+																					}else if(ekran_guncelle_sayac%4==2){
+																						int onlar=(saniye/600)%6;
+																						GPIO_PORTE_DATA_R|=0b1111;
+																						GPIO_PORTB_DATA_R=0b0;
+																						GPIO_PORTE_DATA_R&=~0b0010;
+																					}else if(ekran_guncelle_sayac%4==3){
+																						int yuzler=(saniye/3600)%10;
+																						GPIO_PORTE_DATA_R|=0b1111;
+																						GPIO_PORTB_DATA_R=0b0;
+																						GPIO_PORTE_DATA_R&=~0b0100;
+																					}else if(ekran_guncelle_sayac%4==0){
+																						int binler=(saniye/36000)%6;
+																						GPIO_PORTE_DATA_R|=0b1111;
+																						GPIO_PORTB_DATA_R=0b0;
+																						GPIO_PORTE_DATA_R&=~0b1000;
+																					}
+																			}
+						if(saniye>=68636 && saniye<=68637)//1903 a
+																				{
+																				if(ekran_guncelle_sayac % 4==1){
+																						int birler= (saniye/60)%10;
+																						GPIO_PORTE_DATA_R|=0b1111;
+																						GPIO_PORTB_DATA_R=0b1001111;//3
+																						GPIO_PORTE_DATA_R &=~0b0001; //birler basamagi aktiflesir
+																					}else if(ekran_guncelle_sayac%4==2){
+																						int onlar=(saniye/600)%6;
+																						GPIO_PORTE_DATA_R|=0b1111;
+																						GPIO_PORTB_DATA_R=0b0111111;//0
+																						GPIO_PORTE_DATA_R&=~0b0010;
+																					}else if(ekran_guncelle_sayac%4==3){
+																						int yuzler=(saniye/3600)%10;
+																						GPIO_PORTE_DATA_R|=0b1111;
+																						GPIO_PORTB_DATA_R=0b1101111;//9
+																						GPIO_PORTE_DATA_R&=~0b0100;
+																					}else if(ekran_guncelle_sayac%4==0){
+																						int binler=(saniye/36000)%6;
+																						GPIO_PORTE_DATA_R|=0b1111;
+																						GPIO_PORTB_DATA_R=0b0000110;//1
+																						GPIO_PORTE_DATA_R&=~0b1000;
+																					}
+																			}
+								if(saniye>=68637 && saniye<=68638)//1903 k
+																						{
+																						if(ekran_guncelle_sayac % 4==1){
+																								int birler= (saniye/60)%10;
+																								GPIO_PORTE_DATA_R|=0b1111;
+																								GPIO_PORTB_DATA_R=0b0;
+																								GPIO_PORTE_DATA_R &=~0b0001; //birler basamagi aktiflesir
+																							}else if(ekran_guncelle_sayac%4==2){
+																								int onlar=(saniye/600)%6;
+																								GPIO_PORTE_DATA_R|=0b1111;
+																								GPIO_PORTB_DATA_R=0b0;
+																								GPIO_PORTE_DATA_R&=~0b0010;
+																							}else if(ekran_guncelle_sayac%4==3){
+																								int yuzler=(saniye/3600)%10;
+																								GPIO_PORTE_DATA_R|=0b1111;
+																								GPIO_PORTB_DATA_R=0b0;
+																								GPIO_PORTE_DATA_R&=~0b0100;
+																							}else if(ekran_guncelle_sayac%4==0){
+																								int binler=(saniye/36000)%6;
+																								GPIO_PORTE_DATA_R|=0b1111;
+																								GPIO_PORTB_DATA_R=0b0;
+																								GPIO_PORTE_DATA_R&=~0b1000;
+																							}
+																					}
+								if(saniye>=68638 && saniye<=68640)//1903 a
+																								{
+																								if(ekran_guncelle_sayac % 4==1){
+																										int birler= (saniye/60)%10;
+																										GPIO_PORTE_DATA_R|=0b1111;
+																										GPIO_PORTB_DATA_R=0b1001111;//3
+																										GPIO_PORTE_DATA_R &=~0b0001; //birler basamagi aktiflesir
+																									}else if(ekran_guncelle_sayac%4==2){
+																										int onlar=(saniye/600)%6;
+																										GPIO_PORTE_DATA_R|=0b1111;
+																										GPIO_PORTB_DATA_R=0b0111111;//0
+																										GPIO_PORTE_DATA_R&=~0b0010;
+																									}else if(ekran_guncelle_sayac%4==3){
+																										int yuzler=(saniye/3600)%10;
+																										GPIO_PORTE_DATA_R|=0b1111;
+																										GPIO_PORTB_DATA_R=0b1101111;//9
+																										GPIO_PORTE_DATA_R&=~0b0100;
+																									}else if(ekran_guncelle_sayac%4==0){
+																										int binler=(saniye/36000)%6;
+																										GPIO_PORTE_DATA_R|=0b1111;
+																										GPIO_PORTB_DATA_R=0b0000110;//1
+																										GPIO_PORTE_DATA_R&=~0b1000;
+																									}
+																							}
+
+}
+
+else if(kesme_sayisi%6!=5)
+	{
+	if(ekran_guncelle_sayac % 4==1){
+		int birler= (saniye/60)%10;
+		GPIO_PORTE_DATA_R|=0b1111;
+		GPIO_PORTB_DATA_R=kodlar[birler];
+		GPIO_PORTE_DATA_R &=~0b0001; //birler basamagi aktiflesir
+	}else if(ekran_guncelle_sayac%4==2){
+		int onlar=(saniye/600)%6;
+		GPIO_PORTE_DATA_R|=0b1111;
+		GPIO_PORTB_DATA_R=kodlar[onlar];
+		GPIO_PORTE_DATA_R&=~0b0010;
+	}else if(ekran_guncelle_sayac%4==3){
+		int yuzler=(saniye/3600)%10;
+		GPIO_PORTE_DATA_R|=0b1111;
+		GPIO_PORTB_DATA_R=kodlar[yuzler];
+		GPIO_PORTE_DATA_R&=~0b0100;
+	}else if(ekran_guncelle_sayac%4==0){
+		int binler=(saniye/36000)%6;
+		GPIO_PORTE_DATA_R|=0b1111;
+		GPIO_PORTB_DATA_R=kodlar[binler];
+		GPIO_PORTE_DATA_R&=~0b1000;
+	}
+  }
+}
+
+
+
+int main()
+{
+	init_port_B();
+	init_port_E();
+	init_port_F();
+	PF4_interrupt_init();
+
+	saatgir(19,02,50);
+
+	//ekran guncelleme islemi icin saniyede EKRAN_KESME_HZ tane kesme uretilecek
+	init_timer_0A(SysCtlClockGet()/EKRAN_KESME_HZ);
+
+	//zaman olcmek icin saniyede SYSTICK_HZ tane kesme uretilecek
+	SysTick_Init(SysCtlClockGet()/SYSTICK_HZ);
+
+	enable_interrupts(); //kesmeleri aktiflestirir
+
+	while(1)
+	{
+		wait_for_interrupt();
+	}
+}
+
+
